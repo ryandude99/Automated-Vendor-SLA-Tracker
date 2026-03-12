@@ -1,4 +1,6 @@
 import requests
+from databaseSetup import insertSlaLog
+
 
 def getTrain():
     apiKey = "03f8a336-4167-4b82-be30-09a3f420257d"
@@ -12,8 +14,8 @@ def getTrain():
         trainData = response.json()
         return trainData
     
-    except:
-        print(f"API Error: Connection failed or Timed Out.")
+    except Exception as e:
+        print(f"API Error: Connection failed or Timed Out. Details: {e}")
         return None
 
 
@@ -53,8 +55,10 @@ def prototypeSlaCheck(trainData):
             slaThreshold = 15       #15 more than 15 minutes = breach
             if minutesAway > slaThreshold:
                 print(f"SLA BREACH: Train {trainID} to {station} is {minutesAway} mins away.")
+                insertSlaLog(trainID, station, minutesAway, True)
             else:
                 print(f"ON TIME: Train {trainID} to {station} is {minutesAway} mins away.")
+                insertSlaLog(trainID, station, minutesAway, False)
             
         
         except ValueError:      #Handles Unexpected Formatting
