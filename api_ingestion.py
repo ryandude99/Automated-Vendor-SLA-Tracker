@@ -1,69 +1,101 @@
 import requests
+from datetime import datetime, timezone
 from databaseSetup import insertSlaLog
 
 
 def getTrain():
-    apiKey = "03f8a336-4167-4b82-be30-09a3f420257d"
-    apiUrl = f"https://developerservices.itsmarta.com:18096/railrealtimearrivals?apiKey={apiKey}"
-    
+    apiKey = "97f2339b5e33444995e1538ba99989a9"
+    apiUrl = "https://api-v3.mbta.com/predictions"
+    params = {
+        "api_key": apiKey,
+        "filter[route]": "Red",
+    }
+
     try:
-        print("Fetching live data from MARTA...")
-        response = requests.get(apiUrl, timeout=120)
+        print("Fetching live data from MBTA...")
+        response = requests.get(apiUrl, params=params, timeout=(5,10))
         response.raise_for_status()
 
-        trainData = response.json()
-        return trainData
+        data = response.json()
+        return data
     
     except Exception as e:
-        print(f"API Error: Connection failed or Timed Out. Details: {e}")
+        print(f"API Error: {e}")
         return None
 
 
-def prototypeSlaCheck(trainData):
-    if not trainData:
-        print("No data received.")
+
+def slaPayload(trainData):
+    if not trainData or "data" not in trainData:
+        print("No valid data to process.")
         return
-
-    if isinstance(trainData, dict):
-        keys = list(trainData.keys())
-
-        if len(keys) ==1 and isinstance(trainData[keys[0]], list):
-            trainData = trainData[keys[0]]  #Unwrap Dictionary
-        else:
-            print("Marta sent an error:")
-            #print(trainData)
-            return
     
-    print(f"Successfully pulled {len(trainData)} train records.\n")
-    print("Testing SLA delays on the first 5 records:")
+    print(f"Successfully pulled {len(trainData['data'])} predictions.\n")
+    activeTrains = {}
 
-    for train in trainData[:5]:
-        trainID = train.get("TRAIN_ID", "Unknown ID")
-        station = train.get("STATION", "Unknown Station")
-        waitTime = train.get("WAITING_TIME", "")
+    for train in trainData["data"]:
+        attributes = train.get("attributes", {})
+        relationships = train.get("relationships", {})
 
-        if not waitTime:        #Handle Missing Data
-            print (f"Train {trainID} at {station}: Missing Wait Time Data. Flagged")
+        arrival_time = attributes.get("arrival_time")
+        vehicle = relationships.get("vehicle", {}).get("data")
+        stop = relationships.get("stop", {}).get("data")
+
+        if not arrival_time or not vehicle or not stop:        #Handle Missing Data
             continue
 
+        trainID = vehicle.get("id")
+        station = stop.get("id")
+
         try:
-            if waitTime in ["Arriving", "Arrived", "Boarding"]:
-                minutesAway = 0
-            else:
-                minutesAway = int(waitTime.split(" ")[0])
+            arrivalDT = datetime.fromisoformat(arrival_time.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+
+            minutesAway = int((arrivalDT - now).total_seconds() / 60)
+
+            if minutesAway < 0:
+                continue
             
-            slaThreshold = 15       #15 more than 15 minutes = breach
-            if minutesAway > slaThreshold:
-                print(f"SLA BREACH: Train {trainID} to {station} is {minutesAway} mins away.")
-                insertSlaLog(trainID, station, minutesAway, True)
-            else:
-                print(f"ON TIME: Train {trainID} to {station} is {minutesAway} mins away.")
-                insertSlaLog(trainID, station, minutesAway, False)
-            
+            if trainID not in activeTrains or minutesAway < activeTrains[trainID]["minutesAway"]:
+                activeTrains[trainID] = {
+                    "station": station,
+                    "minutesAway": minutesAway
+                }
         
-        except ValueError:      #Handles Unexpected Formatting
-            print(f"Train {trainID}: Unexpected wait time format. Can not calculate delay.")
+        except Exception:
+            continue
+
+    
+    totalTrains = 0
+    totalOnTime = 0
+    totalBreaches = 0
+    slaThreshold = 5
+    
+    for trainID, data in activeTrains.items():
+        station = data["station"]
+        minutesAway = data["minutesAway"]
+
+        if minutesAway > slaThreshold:
+            insertSlaLog(trainID, station, minutesAway, True)
+            totalBreaches += 1
+        else:
+            insertSlaLog(trainID, station, minutesAway, False)
+            totalOnTime += 1
+            
+        totalTrains += 1
+    
+    if totalTrains > 0:
+        compliancePercentage = (totalOnTime / totalTrains) * 100
+    else:
+        compliancePercentage = 0
+        
+    print(f"Total Trains: {totalTrains}")
+    print(f"Total On Time: {totalOnTime}")
+    print(f"Total Breaches: {totalBreaches}")
+    print(f"SLA Compliance: {compliancePercentage:.1f}%")
+
+
 
 if __name__ == "__main__":
     data = getTrain()
-    prototypeSlaCheck(data)
+    slaPayload(data)
