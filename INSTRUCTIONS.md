@@ -12,25 +12,27 @@ When assisting with this repository, prioritize lightweight, self-contained solu
 ---
 
 ## 1. System Architecture
-This project consists of four core components that handle the ETL pipeline, event-driven alerting, and frontend visualization:
+This project consists of five core components that handle the ETL pipeline, event-driven alerting, frontend visualization, and system validation:
 
 * **`databaseSetup.py` (The "Load" Architecture):**
   * Initializes a local SQLite database named `slaTracker.db`.
   * Creates a relational table named `trainSlaLogs` with schema: `logID` (PK), `trainID` (TEXT), `route` (TEXT), `station` (TEXT), `minutesAway` (INTEGER), `isBreach` (BOOLEAN), and `timestamp` (DATETIME).
   * Uses parameterized queries to securely insert processed SLA metrics.
 * **`api_ingestion.py` (The "Extract" and "Transform" Engine):**
-  * Connects to the MBTA Predictions API using the `requests` library with exponential backoff for error handling.
-  * Parses complex JSONAPI structures (`data`, `attributes`, `relationships`) to extract vehicle, stop, and route IDs.
-  * Utilizes timezone-aware datetime math to calculate live ETAs and deduplicates records to track only the immediate next stop.
-  * Evaluates the ETA against a 5-minute SLA threshold and logs the data.
-* **`alertService.py` (The Alerting Microservice):**
+  * Connects to the MBTA Predictions API using the `requests` library with robust exception handling for null payloads.
+  * Parses complex JSONAPI structures to extract vehicle, stop, and route IDs.
+  * **Crucial Logic:** Intercepts raw timestamps and explicitly standardizes all temporal data to Coordinated Universal Time (UTC) using Python's timezone-aware `datetime` module to ensure system generalizability across geographic zones.
+  * Evaluates the UTC ETA against a 5-minute SLA threshold and logs the data.
+* **`alertService.py` (The State-Aware Alerting Microservice):**
   * Operates as a background daemon loop scanning the database for recent SLA breaches.
-  * Manages an `alertState` SQLite table to track event state and implement a 15-minute cooldown, preventing alert spam.
-  * Formats breach data into a markdown payload and securely posts it to an enterprise Slack channel via Webhook.
+  * Manages an `alertState` SQLite table to track event state and implement a 15-minute cooldown, preventing alert spam and "dashboard fatigue."
+  * Formats breach data into a markdown payload and securely posts it to an enterprise Slack channel via incoming Webhook.
 * **`SLA_Tracker_Dashboard.pbix` (The BI Frontend):**
   * A Microsoft Power BI dashboard connected directly to `slaTracker.db` via an ODBC driver.
   * Utilizes custom DAX measures to calculate overall SLA compliance, average delay severity, and active fleet size dynamically.
-  * Features a customized "Dark Analytics" UI with custom data labels, live data timestamping, and an interactive bookmark-based 'Reset Filters' button.
+  * Features a customized "Dark Analytics" UI with live data timestamping and an interactive bookmark-based 'Reset Filters' button.
+* **`stressTest.py` (Concurrency Validation Tool):**
+  * A dedicated load-testing script designed to bypass the API and inject 1,000 artificial concurrent SLA breaches into the database to validate the architecture's resistance to database lockouts during peak telemetry spikes.
 
 ---
 
@@ -51,7 +53,7 @@ python -m venv venv
 pip install requests python-dotenv
 ```
 
-**Security & API Setup:**
+### Security & API Setup
 You must create a local `.env` file in the root directory to store your secrets. This file is ignored by Git. 
 1. Create a file named `.env`.
 2. Add your Slack Webhook URL to the file:
@@ -70,27 +72,28 @@ Because Power BI does not natively support local SQLite files, an ODBC driver is
 ## 3. Execution Instructions
 The architecture relies on running the data ingestion pipeline and the alerting microservice simultaneously, followed by a manual refresh of the frontend UI.
 
-**Terminal 1: The ETL Pipeline**
+### Terminal 1: The ETL Pipeline
 ```powershell
 # Step 1: Initialize the Database (Creates slaTracker.db and tables)
 python databaseSetup.py
 
-# Step 2: Run the ETL Pipeline (Pulls live MBTA data, checks SLAs, and saves to DB)
+# Step 2: Run the ETL Pipeline (Pulls live MBTA data, standardizes to UTC, and saves to DB)
 python api_ingestion.py
 ```
 
-**Terminal 2: The Alerting Microservice**
+### Terminal 2: The Alerting Microservice
 ```powershell
-# Step 3: Start the Daemon (Scans the DB and fires Slack alerts)
+# Step 3: Start the Daemon (Scans the DB and fires state-aware Slack alerts)
 python alertService.py
 ```
 
-**The Power BI Frontend**
+### The Power BI Frontend
 * **Step 4:** Open `SLA_Tracker_Dashboard.pbix` in Power BI Desktop. Navigate to the top `Home` ribbon and click the **Refresh** button. This will force the ODBC driver to query the SQLite database and instantly update all visuals and DAX calculations with the latest API data.
 
 ---
 
 ## 4. Testing and Validation
-* **Database Load Validation:** Install an SQLite viewer extension (e.g., "SQLite Viewer" for VS Code). Open `slaTracker.db` and click the refresh icon to verify that parsed records are inserting correctly.
-* **Microservice Validation:** When `api_ingestion.py` logs a breach (>5 mins), verify that `alertService.py` detects it within 60 seconds and pushes a formatted Markdown alert to your designated Slack workspace. Verify that subsequent runs within 15 minutes do not trigger duplicate Slack messages for the same train.
+* **Database Load Validation:** Install an SQLite viewer extension (e.g., "SQLite Viewer" for VS Code). Open `slaTracker.db` and click the refresh icon to verify that parsed records are inserting correctly with UTC timestamps.
+* **Microservice & Throttling Validation:** When `api_ingestion.py` logs a breach (>5 mins), verify that `alertService.py` detects it and pushes a formatted Markdown alert to Slack. To validate the UX logic, run `api_ingestion.py` a second time within 15 minutes; verify that the daemon correctly suppresses the duplicate Slack webhook.
+* **Concurrency Stress Testing:** With the daemon running in Terminal 2, open a new terminal and execute `python stressTest.py`. Verify that the script successfully processes all 1,000 artificial database inserts in under a second without throwing an `sqlite3.OperationalError: database is locked` exception.
 * **Frontend Validation:** After clicking "Refresh" in Power BI, verify that the "Live Data As Of:" stamp updates to the current time. Click on a specific bar in the "Top Contract Violators" chart to verify that all KPI cards dynamically recalculate for that specific vehicle. Hold `CTRL` and click the green "Reset Filters" button to verify the bookmark action clears the UI selections.
